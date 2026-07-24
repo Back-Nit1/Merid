@@ -94,12 +94,12 @@ BRAINTRUST_API_KEY=...   # uploads eval runs to Braintrust (project "meridian")
 
 What each key unlocks, and what happens without it:
 
-| Key | With it | Without it |
-|---|---|---|
-| Fireworks | Uploaded referral text is extracted into structured features | Upload routes to `ESCALATE` for human review (seeded demo cases still work — they carry known features) |
-| Daytona | Documents are decoded in an isolated sandbox; provenance (`sandbox_id`, duration) is logged and badged | Parsing is refused and the referral escalates — it never falls back to parsing untrusted files in-process |
-| ElevenLabs | Audible voice calls | Text-transcript simulation of the same call flow |
-| Braintrust | `python -m evals.run` also logs experiments remotely | Evals still run and write `data/evals_summary.json` locally |
+| Key        | With it                                                                                                | Without it                                                                                                |
+| ---------- | ------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
+| Fireworks  | Uploaded referral text is extracted into structured features                                           | Upload routes to `ESCALATE` for human review (seeded demo cases still work — they carry known features)   |
+| Daytona    | Documents are decoded in an isolated sandbox; provenance (`sandbox_id`, duration) is logged and badged | Parsing is refused and the referral escalates — it never falls back to parsing untrusted files in-process |
+| ElevenLabs | Audible voice calls                                                                                    | Text-transcript simulation of the same call flow                                                          |
+| Braintrust | `python -m evals.run` also logs experiments remotely                                                   | Evals still run and write `data/evals_summary.json` locally                                               |
 
 Tuning knobs (all optional, sane defaults): `FIREWORKS_MODEL` (default
 `accounts/fireworks/models/deepseek-v4-pro`), `FIREWORKS_TIMEOUT_S` (60),
@@ -205,18 +205,69 @@ build tooling and are not reachable in this demo. **Do not run
 Stop it (`Ctrl+C`) and re-run `npm run build && npm start`, then hard-refresh
 the browser (`Cmd/Ctrl+Shift+R`).
 
-## A note on the frontend (no CopilotKit)
+## CopilotKit — the nurse worklist assistant
 
-The frontend was originally scaffolded with CopilotKit, but nothing in the app
-was ever wired to it — no chat, no `useCopilotReadable`, no actions. With no
-LLM adapter provisioned, the only thing the CopilotKit provider did was a
-runtime/agent-discovery handshake against an adapter-less route, which threw
-`CopilotApiDiscoveryError` and broke page rendering ("This page couldn't
-load"). Since it added no function and broke the app, it was removed from the
-render path — the frontend is now plain Next.js + Tailwind talking to the
-backend over `fetch`. `src/components/Providers.tsx` and
-`src/app/api/copilotkit/route.ts` document how to reinstate a real copilot
-(with an LLM adapter) if you want one later.
+CopilotKit is mounted app-wide in `src/components/Providers.tsx` and backed by
+a real adapter in `src/app/api/copilotkit/route.ts`. The adapter points at
+**Fireworks**, not OpenAI: Fireworks exposes an OpenAI-compatible `/v1`
+surface, so `OpenAIAdapter` works against it with a `baseURL` override and the
+copilot reuses the `FIREWORKS_API_KEY` this project already provisions — no new
+vendor, no new key.
+
+The copilot appears as a sidebar on a referral detail page
+(`src/components/WorklistCopilot.tsx`) and is deliberately narrow in scope:
+
+- **Explains** a verdict from data already on the page — which rules fired and
+  their rationale, what was extracted, what's missing, which `source_ref` a
+  feature came from. `useCopilotReadable` grounds it in the real verdict so it
+  answers from the record rather than from the model's clinical priors.
+- **Dispatches** the same approve/escalate endpoints the buttons call, via
+  `useCopilotAction`.
+- **Does not triage.** It cannot set urgency, and it never diagnoses. Urgency
+  comes only from the deterministic rule engine; the copilot quotes it.
+
+Both mutating actions use `renderAndWaitForResponse`, so a human physically
+confirms before anything is signed — invariant #4 holds, the LLM cannot approve
+a verdict on its own. The system prompt additionally forbids condition names,
+likelihood language, and reassurance (invariant #2).
+
+Historical note worth keeping: an earlier version mounted the provider against
+an *adapter-less* route, which failed agent discovery with
+`CopilotApiDiscoveryError` and broke page rendering. The route now returns a
+valid response even with no API key set, so a missing key degrades the copilot
+to a no-op instead of taking the worklist down with it.
+
+### Slack + Google Calendar (provider side)
+
+When a nurse approves a verdict, the backend notifies the provider's Slack and
+requests a calendar event. Both fire **after** the approval is signed and
+committed, and neither can raise — a Slack outage must never surface as a
+failed approval (`services/notify/slack.py`, `services/notify/calendar.py`).
+
+- **Threshold.** `SLACK_NOTIFY_MIN_URGENCY` (default `urgent`) gates both
+  channels. Set it to `routine` to notify on every approved verdict. A routine
+  screening referral pinging the channel is how a channel gets muted — and then
+  the urgent one gets missed.
+- **Output-filtered, fail-closed.** Invariant #2 applies to staff channels too:
+  Slack messages land on lock screens, get exported, and get screenshotted. If
+  the filter blocks or errors, nothing posts.
+- **Minimal clinical content by construction.** Notifications carry urgency,
+  rule IDs (config identifiers, not diagnoses), and a deep link. Calendar
+  titles are `Colonoscopy consult — <referral-id> (<urgency>)` and nothing
+  more. Patient detail stays behind the link, where it's access-controlled.
+
+Calendar events are created by a **Slack Workflow** using the Google Calendar
+connector, triggered by the `[MERIDIAN-CALENDAR]` marker in the posted message.
+That keeps setup entirely inside the Slack UI — no GCP project, no service
+account, no domain-wide delegation. Known tradeoff: the event is created
+outside this system, so no Google event ID comes back and the booking itself
+isn't in our audit trail — only the intent to book is. `build_event()` is
+transport-agnostic, so swapping in a direct Calendar API call (which would
+return an ID we can persist) is a one-file change.
+
+Setup: create an Incoming Webhook at api.slack.com/apps → Incoming Webhooks →
+Activate → Add New Webhook to Workspace, then set `SLACK_WEBHOOK_URL` in `.env`.
+Unset means no notification, never an error.
 
 ## Deployment (Vercel)
 

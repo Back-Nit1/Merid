@@ -22,6 +22,8 @@ from app.db import (
     init_db,
 )
 from app.schemas import ReferralFeatures, TriageVerdict
+from services.notify.calendar import create_calendar_event
+from services.notify.slack import notify_verdict_approved
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("meridian.api")
@@ -44,6 +46,18 @@ app.add_middleware(
 @app.on_event("startup")
 def _startup() -> None:
     init_db()
+
+
+@app.get("/")
+def root() -> dict:
+    """Liveness landing page — confirms the API is up without hitting a real route."""
+    return {
+        "service": "Meridian API",
+        "status": "ok",
+        "notice": "DEMO — synthetic data. Not for clinical use.",
+        "docs": "/docs",
+        "health": "/health",
+    }
 
 
 @app.get("/health")
@@ -241,7 +255,33 @@ def approve_verdict(referral_id: str, verdict_id: str, body: ApproveRequest) -> 
             "verdict_approved",
             extra={"referral_id": referral_id, "verdict_id": verdict_id, "actor": actor},
         )
-        return {"status": "approved", "approval_hash": approval_hash, "approved_at": approved_at.isoformat()}
+
+        # Notification happens strictly AFTER commit, and neither call can
+        # raise. The approval is already signed and durable at this point —
+        # a Slack or calendar failure must never surface as a failed approval.
+        notify_result = notify_verdict_approved(
+            referral_id=referral_id,
+            verdict_id=verdict_id,
+            urgency=verdict.urgency,
+            rules_fired=verdict.rules_fired,
+            rule_version=verdict.rule_version,
+            approved_by=actor,
+            booked_slot=body.slot,
+        )
+        calendar_result = create_calendar_event(
+            referral_id=referral_id,
+            urgency=verdict.urgency,
+            booked_slot=body.slot,
+            approved_by=actor,
+        )
+
+        return {
+            "status": "approved",
+            "approval_hash": approval_hash,
+            "approved_at": approved_at.isoformat(),
+            "slack": notify_result.get("status"),
+            "calendar": calendar_result.get("status"),
+        }
     finally:
         session.close()
 

@@ -7,6 +7,7 @@ import { ApiError, get } from "@/lib/api";
 import type { ReferralWorklistItem, TriageVerdict } from "@/lib/types";
 import FeatureTable from "@/components/FeatureTable";
 import VerdictPanel from "@/components/VerdictPanel";
+import WorklistCopilot from "@/components/WorklistCopilot";
 import { SandboxBadge } from "@/components/badges";
 
 export default function ReferralDetailPage() {
@@ -99,6 +100,11 @@ export default function ReferralDetailPage() {
               </p>
             )}
           </div>
+
+          {/* Nurse copilot — reads this referral's verdict, dispatches
+              approve/escalate with human confirmation. Mounted only once the
+              item has loaded so the readable context is never empty. */}
+          <WorklistCopilot item={item} onUpdated={handleVerdictUpdated} />
         </div>
       )}
     </div>
